@@ -307,3 +307,158 @@ export default {
 }
 ```
 
+#### 2.2 VNode的指令相关处理
+
+```js
+import { emptyNode } from 'core/vdom/patch'
+import { resolveAsset, handleError } from 'core/util/index'
+import { mergeVNodeHook } from 'core/vdom/helpers/index'
+
+export default {
+  create: updateDirectives,
+  update: updateDirectives,
+  destroy: function unbindDirectives (vnode: VNodeWithData) {
+    updateDirectives(vnode, emptyNode)
+  }
+}
+
+// 更改vnode.data中指令内容
+function updateDirectives (oldVnode: VNodeWithData, vnode: VNodeWithData) {
+  // 若oldVnode与vnode的指令都不存在，则无须更新
+  if (oldVnode.data.directives || vnode.data.directives) {
+    _update(oldVnode, vnode)
+  }
+}
+
+// 详细的指令更新规则
+function _update (oldVnode, vnode) {
+  // 判断本次更新是哪种类型的操作
+  const isCreate = oldVnode === emptyNode // 创建指令
+  const isDestroy = vnode === emptyNode // 删除指令
+  
+  const oldDirs = normalizeDirectives(oldVnode.data.directives, oldVnode.context)
+  const newDirs = normalizeDirectives(vnode.data.directives, vnode.context)
+
+  const dirsWithInsert = [] // 存放已经完成插入的指令
+  const dirsWithPostpatch = [] // 存放需要更新的指令
+
+  let key, oldDir, dir
+  for (key in newDirs) {
+    oldDir = oldDirs[key]
+    dir = newDirs[key]
+    // 指令初始化，运行bind钩子
+    if (!oldDir) {
+      // new directive, bind
+      // 新指令需要执行bind钩子函数
+      callHook(dir, 'bind', vnode, oldVnode)
+      
+      // 包含该指令的dom如果已经插入了，则该变量inserted = true
+      if (dir.def && dir.def.inserted) {
+        dirsWithInsert.push(dir)
+      }
+      
+    // 更新指令，运行update钩子
+    } else {
+      // existing directive, update
+      dir.oldValue = oldDir.value
+      dir.oldArg = oldDir.arg
+      callHook(dir, 'update', vnode, oldVnode)
+      //
+      if (dir.def && dir.def.componentUpdated) {
+        dirsWithPostpatch.push(dir)
+      }
+    }
+  }
+	
+  // 遍历插入的指令，然后运行插入相关的钩子
+  if (dirsWithInsert.length) {
+    // 定义插入后的钩子inserted
+    const callInsert = () => {
+      for (let i = 0; i < dirsWithInsert.length; i++) {
+        callHook(dirsWithInsert[i], 'inserted', vnode, oldVnode)
+      }
+    }
+    
+    // 如果是初次创建模式
+    if (isCreate) {
+      // 运行insert钩子后，再运行inserted钩子
+      // 详细可看mergeVNodeHook相关源码
+      mergeVNodeHook(vnode, 'insert', callInsert)
+    } else {
+      callInsert() // 运行inserted钩子
+    }
+  }
+	
+  // 遍历更新指令
+  if (dirsWithPostpatch.length) {
+    // 运行postpatch钩子，再运行componentUpdated钩子
+    mergeVNodeHook(vnode, 'postpatch', () => {
+      for (let i = 0; i < dirsWithPostpatch.length; i++) {
+        callHook(dirsWithPostpatch[i], 'componentUpdated', vnode, oldVnode)
+      }
+    })
+  }
+	
+  // 非创建模式的更新
+  if (!isCreate) {
+    // 旧指令不在新指令里，说明指令去除，则调用unbind钩子
+    for (key in oldDirs) {
+      if (!newDirs[key]) {
+        // no longer present, unbind
+        callHook(oldDirs[key], 'unbind', oldVnode, oldVnode, isDestroy)
+      }
+    }
+  }
+}
+
+const emptyModifiers = Object.create(null)
+
+// 常规化指令，将指令解析，并且绑定this
+function normalizeDirectives (
+  dirs: ?Array<VNodeDirective>,
+  vm: Component
+): { [key: string]: VNodeDirective } {
+  // 创建结果为{}形式
+  const res = Object.create(null)
+  
+  if (!dirs) {
+    return res
+  }
+    
+  let i, dir
+  for (i = 0; i < dirs.length; i++) {
+    dir = dirs[i]
+    // 初始化指令的修饰符属性
+    if (!dir.modifiers) {
+      dir.modifiers = emptyModifiers
+    }
+    // 添加指令的原始名称，并指向当前指令
+    // 如：res['click.stop'] = dir
+    res[getRawDirName(dir)] = dir
+    // 通过resolveAsset完成根option的指令合并，
+    // 详细可看下core/utils/options.js的resolveAsset
+    dir.def = resolveAsset(vm.$options, 'directives', dir.name, true)
+  }
+  return res
+}
+
+// 获取指令的原始名称
+function getRawDirName (dir: VNodeDirective): string {
+  // 如：{ name: 'click', modifiers: { stop: true, prevent: true }} -> 'click.stop.prevent'
+  return dir.rawName || `${dir.name}.${Object.keys(dir.modifiers || {}).join('.')}`
+}
+
+// 调用指令钩子 bind，update，inserted等
+function callHook (dir, hook, vnode, oldVnode, isDestroy) {
+  const fn = dir.def && dir.def[hook]
+  if (fn) {
+    try {
+      fn(vnode.elm, dir, vnode, oldVnode, isDestroy)
+    } catch (e) {
+      handleError(e, vnode.context, `directive ${dir.name} ${hook} hook`)
+    }
+  }
+}
+
+```
+
